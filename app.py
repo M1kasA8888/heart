@@ -172,29 +172,32 @@ class Obstacle3D:
             dy /= length
         
         # 垂直方向（左绕行和右绕行的方向）
-        perp_x = -dy  # 左绕行方向
+        perp_x = -dy
         perp_y = dx
         
         # 计算偏移距离（基于障碍物大小）
-        offset = max(self.width, self.height) * 0.2
+        offset = max(self.width, self.height) * 0.25 + 0.002
         
         # 三个候选点
-        candidates = {
-            'left': [self.center[0] + perp_y * offset, self.center[1] + perp_x * offset],
-            'right': [self.center[0] - perp_y * offset, self.center[1] - perp_x * offset],
-            'best': None
-        }
+        left_point = [self.center[0] + perp_y * offset, self.center[1] + perp_x * offset]
+        right_point = [self.center[0] - perp_y * offset, self.center[1] - perp_x * offset]
         
         # 计算最佳航线（取距离最短的）
-        left_dist = self._calculate_path_length(start, candidates['left'], end)
-        right_dist = self._calculate_path_length(start, candidates['right'], end)
+        left_dist = self._calculate_path_length(start, left_point, end)
+        right_dist = self._calculate_path_length(start, right_point, end)
         
         if left_dist <= right_dist:
-            candidates['best'] = candidates['left']
+            best_point = left_point
         else:
-            candidates['best'] = candidates['right']
+            best_point = right_point
         
-        return candidates.get(direction, candidates['best'])
+        candidates = {
+            'left': left_point,
+            'right': right_point,
+            'best': best_point
+        }
+        
+        return candidates.get(direction, best_point)
     
     def _calculate_path_length(self, start, mid, end):
         """计算路径总长度"""
@@ -215,7 +218,6 @@ class Obstacle3D:
         📍 边界点数: {len(self.points)}
         📏 高度范围: {self.min_height}m - {self.max_height}m
         📐 尺寸: {self.width*111000:.0f}m x {self.height*111000:.0f}m
-        🕐 创建时间: {self.created_time.strftime('%H:%M:%S')}
         """
 
 
@@ -334,7 +336,6 @@ class FlightPlanner:
         return intersecting
     
     def check_waypoint_safe(self, point: List[float]) -> bool:
-        """检查点是否安全（不与任何障碍物冲突）"""
         for obs in self.obstacles:
             if obs.contains_point_2d(point):
                 return False
@@ -354,12 +355,12 @@ class FlightPlanner:
                 waypoints=[start, end],
                 total_distance=self.calculate_distance(start, end),
                 color="blue",
-                description="无障碍物，直接飞行",
+                description="✅ 无障碍物，直接飞行",
                 is_safe=True
             ))
             return plans
         
-        # 分类障碍物
+        # 分类障碍物：需要绕行的
         need_bypass = []
         for obs in intersecting:
             if self.flight_altitude < obs.min_height:
@@ -373,7 +374,7 @@ class FlightPlanner:
                 waypoints=[start, end],
                 total_distance=total_distance,
                 color="green",
-                description=f"当前高度{self.flight_altitude}m可飞越",
+                description=f"✅ 当前高度{self.flight_altitude}m可飞越",
                 is_safe=True
             ))
             return plans
@@ -391,7 +392,7 @@ class FlightPlanner:
                 waypoints=left_waypoints,
                 total_distance=left_distance,
                 color="orange",
-                description=f"从障碍物「{first_obs.name}」左侧绕行",
+                description=f"从「{first_obs.name}」左侧绕行",
                 is_safe=True
             ))
         
@@ -405,7 +406,7 @@ class FlightPlanner:
                 waypoints=right_waypoints,
                 total_distance=right_distance,
                 color="purple",
-                description=f"从障碍物「{first_obs.name}」右侧绕行",
+                description=f"从「{first_obs.name}」右侧绕行",
                 is_safe=True
             ))
         
@@ -419,7 +420,7 @@ class FlightPlanner:
                 waypoints=best_waypoints,
                 total_distance=best_distance,
                 color="gold",
-                description=f"最短绕行路径，节省{(max([p.total_distance for p in plans]) - best_distance) if plans else 0:.0f}m",
+                description=f"最短路径，节省{(max([p.total_distance for p in plans]) - best_distance) if plans else 0:.0f}m",
                 is_safe=True
             ))
         
@@ -933,7 +934,10 @@ if st.session_state.page == "🗺️ 航线规划":
         
         st.markdown("---")
         
-        # 生成航线方案
+        # ========== 多航线选择区域 ==========
+        st.markdown("### 🗺️ 多航线规划")
+        
+        # 生成航线方案按钮
         if st.button("🎯 生成航线方案", use_container_width=True, type="primary"):
             if st.session_state.point_a and st.session_state.point_b:
                 start = st.session_state.point_a.copy()
@@ -961,186 +965,10 @@ if st.session_state.page == "🗺️ 航线规划":
         # 显示航线方案选择
         if st.session_state.route_plans:
             st.markdown("---")
-            st.markdown("### 🗺️ 选择航线方案")
+            st.markdown("#### 📋 可选航线方案")
             
-            # 方案卡片
+            # 用卡片形式显示三个方案
             for i, plan in enumerate(st.session_state.route_plans):
-                col1, col2, col3 = st.columns([2, 1, 1])
-                with col1:
-                    if i == st.session_state.selected_plan_index:
-                        st.markdown(f"**✅ {plan.name}**")
-                    else:
-                        st.markdown(f"**{plan.name}**")
-                    st.caption(plan.description)
-                with col2:
-                    st.metric("距离", f"{plan.total_distance:.0f}m")
-                with col3:
-                    st.metric("时间", f"{plan.estimated_time:.0f}s")
-                
-                if st.button(f"选择此方案", key=f"select_plan_{i}", use_container_width=True):
-                    st.session_state.selected_plan_index = i
-                    st.session_state.selected_plan = plan
-                    st.success(f"已选择: {plan.name}")
-                    st.rerun()
-                st.markdown("---")
-            
-            # 显示选中方案的详细信息
-            if st.session_state.selected_plan:
-                st.markdown("### 📋 当前选中方案")
-                plan = st.session_state.selected_plan
-                st.info(f"""
-                **{plan.name}**
-                - 路径类型: {plan.description}
-                - 总航程: {plan.total_distance:.2f} 米
-                - 预计时间: {plan.estimated_time:.2f} 秒
-                - 航点数量: {plan.num_waypoints}
-                - 安全状态: {'✅ 安全' if plan.is_safe else '⚠️ 注意'}
-                """)
-                
-                if st.button("✈️ 确认使用此航线", use_container_width=True, type="primary"):
-                    st.session_state.flight_plan = {
-                        'waypoints': plan.waypoints,
-                        'total_distance': plan.total_distance,
-                        'estimated_time': plan.estimated_time,
-                        'is_safe': plan.is_safe,
-                        'path_type': plan.name,
-                        'num_waypoints': plan.num_waypoints,
-                        'flight_altitude': flight_altitude
-                    }
-                    st.success(f"✅ 已确认使用 {plan.name}")
-                    st.rerun()
-
-
-# ==================== 页面2: 飞行监控 ====================
-else:
-    st.title("📡 飞行监控")
-    st.markdown("实时监控无人机飞行状态和心跳信号")
-    st.markdown("---")
-    
-    col_left, col_right = st.columns([1, 1])
-    
-    with col_left:
-        st.subheader("🚁 飞行状态")
-        
-        if st.session_state.flight_plan:
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                if st.button("▶️ 开始飞行", use_container_width=True, type="primary") and not st.session_state.is_flying:
-                    st.session_state.is_flying = True
-                    st.session_state.simulator = DroneSimulator(
-                        st.session_state.flight_plan['waypoints'], 15,
-                        st.session_state.flight_plan.get('flight_altitude', 50)
-                    )
-                    st.session_state.start_time = datetime.now()
-                    st.session_state.altitude_data = []
-                    st.rerun()
-            with col2:
-                if st.button("⏸️ 暂停", use_container_width=True):
-                    st.session_state.is_flying = False
-            with col3:
-                if st.button("🛑 终止", use_container_width=True):
-                    st.session_state.is_flying = False
-                    st.session_state.simulator = None
-                    st.rerun()
-        
-        if st.session_state.get('is_flying') and st.session_state.get('simulator'):
-            status = st.session_state.simulator.get_status()
-            elapsed = (datetime.now() - st.session_state.start_time).total_seconds()
-            heartbeat = st.session_state.heartbeat_monitor.send_heartbeat()
-            
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("📍 当前航点", f"{status['current_waypoint']}/{status['total_waypoints']}")
-            with col2:
-                st.metric("⚡ 飞行速度", "15 m/s")
-            with col3:
-                st.metric("⏱️ 已用时间", f"{elapsed:.1f}s")
-            with col4:
-                st.metric("📏 剩余距离", f"{status['remaining_distance']:.0f}m")
-            
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("📊 完成进度", f"{status['progress']:.1f}%")
-            with col2:
-                battery = max(0, 100 - elapsed / 6)
-                st.metric("🔋 电量", f"{battery:.0f}%")
-            with col3:
-                hb_status = st.session_state.heartbeat_monitor.get_status()
-                st.metric("💓 心跳", f"{hb_status['heartbeat_rate']}/min")
-            with col4:
-                st.metric("🛩️ 飞行高度", f"{status['altitude']:.0f} m")
-            
-            st.progress(int(status['progress']))
-            
-            st.session_state.altitude_data.append({
-                'time': elapsed,
-                'altitude': status['altitude'],
-                'delay': heartbeat['delay_ms']
-            })
-            if len(st.session_state.altitude_data) > 50:
-                st.session_state.altitude_data = st.session_state.altitude_data[-50:]
-            
-            if len(st.session_state.altitude_data) > 1:
-                df = pd.DataFrame(st.session_state.altitude_data)
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(x=df['time'], y=df['altitude'],
-                                         mode='lines', name='飞行高度 (m)',
-                                         line=dict(color='green', width=2)))
-                fig.add_trace(go.Scatter(x=df['time'], y=df['delay'],
-                                         mode='lines', name='心跳延迟 (ms)',
-                                         line=dict(color='orange', width=2, dash='dash')))
-                fig.update_layout(title="实时飞行数据", xaxis_title="时间 (秒)", yaxis_title="数值")
-                st.plotly_chart(fig, use_container_width=True)
-            
-            if status['progress'] >= 100:
-                st.success("✅ 飞行完成！")
-                st.session_state.is_flying = False
-                st.balloons()
-            else:
-                st.session_state.simulator.update(0.1)
-                time.sleep(0.1)
-                st.rerun()
-        else:
-            st.info("点击「开始飞行」启动监控")
-    
-    with col_right:
-        st.subheader("💓 心跳信号监控")
-        hb_status = st.session_state.heartbeat_monitor.get_status()
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("📤 发送总数", hb_status['total_sent'])
-        with col2:
-            st.metric("📥 接收总数", hb_status['total_received'])
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("✅ 成功率", f"{hb_status['success_rate']:.1f}%")
-        with col2:
-            st.metric("⚠️ 超时次数", hb_status['timeout_count'])
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            status_text = "🟢 正常" if hb_status['is_connected'] else "🔴 超时"
-            st.metric("🔗 连接状态", status_text)
-        with col2:
-            st.metric("💓 心跳频率", f"{hb_status['heartbeat_rate']}/min")
-        
-        st.markdown("---")
-        st.markdown("### 📋 最新心跳记录")
-        
-        recent = st.session_state.heartbeat_monitor.get_recent_heartbeats(8)
-        if recent:
-            df = pd.DataFrame(recent)
-            st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
-            st.info("等待心跳信号...")
-        
-        if len(st.session_state.heartbeat_monitor.receive_log) > 0:
-            st.markdown("---")
-            st.markdown("### 📈 心跳延迟趋势")
-            df_delay = pd.DataFrame(st.session_state.heartbeat_monitor.receive_log[-50:])
-            fig = px.line(df_delay, x='seq', y='delay_ms',
-                         title="心跳延迟实时监控",
-                         labels={'seq': '心跳序号', 'delay_ms': '延迟(ms)'})
-            st.plotly_chart(fig, use_container_width=True)
+                # 根据方案类型设置背景色
+                if "左绕行" in plan.name:
+               
