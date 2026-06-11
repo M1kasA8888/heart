@@ -139,18 +139,50 @@ class Obstacle3D:
         return inside
     
     def contains_point_2d(self, point: List[float]) -> bool:
-        """只检查2D投影"""
         return self._point_in_polygon(point)
     
     def contains_point_3d(self, point: List[float], altitude: float) -> bool:
-        """3D碰撞检测"""
         if not self._point_in_polygon(point):
             return False
         return self.min_height <= altitude <= self.max_height
     
     def can_fly_over(self, altitude: float) -> bool:
-        """是否可以从上方飞越"""
         return altitude > self.max_height
+    
+    def can_fly_under(self, altitude: float) -> bool:
+        return altitude < self.min_height
+    
+    def get_bypass_points(self, start: List[float], end: List[float]) -> List[List[float]]:
+        """获取绕行点"""
+        lats = [p[0] for p in self.points]
+        lons = [p[1] for p in self.points]
+        center_lat = (min(lats) + max(lats)) / 2
+        center_lon = (min(lons) + max(lons)) / 2
+        
+        # 计算从起点到终点的方向
+        dx = end[1] - start[1]
+        dy = end[0] - start[0]
+        
+        # 垂直方向
+        perp_x = -dy
+        perp_y = dx
+        length = math.sqrt(perp_x**2 + perp_y**2)
+        if length > 0:
+            perp_x /= length
+            perp_y /= length
+        
+        # 计算障碍物尺寸
+        width = max(lons) - min(lons)
+        height = max(lats) - min(lats)
+        offset = max(width, height) * 0.15  # 15%偏移量
+        
+        # 左右两个绕行候选点
+        candidates = [
+            [center_lat + perp_y * offset, center_lon + perp_x * offset],
+            [center_lat - perp_y * offset, center_lon - perp_x * offset]
+        ]
+        
+        return candidates
     
     def get_description(self) -> str:
         return f"""
@@ -164,7 +196,7 @@ class Obstacle3D:
 # ==================== 障碍物持久化管理 ====================
 class ObstaclePersistence:
     CONFIG_FILE = "obstacle_config.json"
-    VERSION = "v14.0"
+    VERSION = "v15.0"
     
     @classmethod
     def save_obstacles(cls, obstacles: List[Obstacle3D]):
@@ -215,7 +247,7 @@ class ObstaclePersistence:
         return {'exists': False, 'count': 0}
 
 
-# ==================== 智能航线规划模块（支持绕行和飞越） ====================
+# ==================== 智能航线规划模块 ====================
 class FlightPlanner:
     def __init__(self, obstacles: List[Obstacle3D], safe_radius: float, flight_altitude: float = 50):
         self.obstacles = obstacles
@@ -231,28 +263,6 @@ class FlightPlanner:
         a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
         return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     
-    def get_intersecting_obstacles(self, start: List[float], end: List[float]) -> List[Obstacle3D]:
-        """获取与线段相交的障碍物"""
-        intersecting = []
-        for obs in self.obstacles:
-            # 检查线段是否与障碍物的2D投影相交
-            if self.line_intersects_polygon(start, end, obs.points):
-                intersecting.append(obs)
-        return intersecting
-    
-    def line_intersects_polygon(self, start: List[float], end: List[float], polygon: List[List[float]]) -> bool:
-        """检查线段是否与多边形相交"""
-        # 采样检查
-        num_samples = 20
-        for i in range(num_samples + 1):
-            t = i / num_samples
-            lat = start[0] + (end[0] - start[0]) * t
-            lon = start[1] + (end[1] - start[1]) * t
-            point = [lat, lon]
-            if self.point_in_polygon(point, polygon):
-                return True
-        return False
-    
     def point_in_polygon(self, point: List[float], polygon: List[List[float]]) -> bool:
         x, y = point[1], point[0]
         inside = False
@@ -264,119 +274,132 @@ class FlightPlanner:
                 inside = not inside
         return inside
     
-    def find_bypass_points(self, start: List[float], end: List[float], obstacle: Obstacle3D) -> List[List[float]]:
-        """找到绕过单个障碍物的路径点"""
-        # 获取障碍物的边界框
-        lats = [p[0] for p in obstacle.points]
-        lons = [p[1] for p in obstacle.points]
-        min_lat, max_lat = min(lats), max(lats)
-        min_lon, max_lon = min(lons), max(lons)
-        
-        # 扩展一点作为安全距离
-        lat_offset = (max_lat - min_lat) * 0.1
-        lon_offset = (max_lon - min_lon) * 0.1
-        
-        # 四个绕行候选点
-        candidates = [
-            [min_lat - lat_offset, (min_lon + max_lon) / 2],  # 北侧
-            [max_lat + lat_offset, (min_lon + max_lon) / 2],  # 南侧
-            [(min_lat + max_lat) / 2, min_lon - lon_offset],  # 西侧
-            [(min_lat + max_lat) / 2, max_lon + lon_offset],  # 东侧
-        ]
-        
-        best_point = None
-        best_distance = float('inf')
-        
-        for candidate in candidates:
-            # 检查候选点是否在障碍物内
-            if self.point_in_polygon(candidate, obstacle.points):
-                continue
-            
-            # 计算总距离
-            d1 = self.calculate_distance(start, candidate)
-            d2 = self.calculate_distance(candidate, end)
-            total = d1 + d2
-            
-            if total < best_distance:
-                best_distance = total
-                best_point = candidate
-        
-        return best_point
+    def line_intersects_obstacle(self, start: List[float], end: List[float], obstacle: Obstacle3D) -> bool:
+        """检查线段是否与障碍物相交"""
+        num_samples = 30
+        for i in range(num_samples + 1):
+            t = i / num_samples
+            lat = start[0] + (end[0] - start[0]) * t
+            lon = start[1] + (end[1] - start[1]) * t
+            point = [lat, lon]
+            if obstacle.contains_point_2d(point):
+                return True
+        return False
+    
+    def get_intersecting_obstacles(self, start: List[float], end: List[float]) -> List[Obstacle3D]:
+        """获取与路径相交的障碍物"""
+        intersecting = []
+        for obs in self.obstacles:
+            if self.line_intersects_obstacle(start, end, obs):
+                intersecting.append(obs)
+        return intersecting
     
     def plan_route(self, start: List[float], end: List[float]) -> Optional[Dict]:
-        """智能规划航线（优先绕行，无法绕行则提示升高）"""
+        """智能规划航线 - 低空绕行，高空飞越"""
         
         # 获取所有相交的障碍物
         intersecting = self.get_intersecting_obstacles(start, end)
         
-        # 如果没有障碍物，走直线
         if not intersecting:
+            # 无障碍物，直线飞行
             total_distance = self.calculate_distance(start, end)
             return {
                 'waypoints': [start, end],
                 'total_distance': total_distance,
                 'estimated_time': total_distance / 15,
                 'is_safe': True,
-                'path_type': '✅ 直线路径（无障碍物）',
+                'is_bypass': False,
+                'path_type': '✅ 直线路径',
                 'num_waypoints': 2,
                 'flight_altitude': self.flight_altitude,
-                'warnings': []
+                'message': '无障碍物，直线飞行'
             }
         
-        # 检查哪些障碍物与当前高度冲突
-        height_conflicts = []
-        bypass_needed = []
+        # 分类障碍物：需要绕行的 vs 可以飞越的
+        need_bypass = []
         can_fly_over = []
         
         for obs in intersecting:
-            if obs.min_height <= self.flight_altitude <= obs.max_height:
-                height_conflicts.append(obs)
-                # 检查是否可以绕行
-                bypass_point = self.find_bypass_points(start, end, obs)
-                if bypass_point:
-                    bypass_needed.append(obs)
-                else:
-                    can_fly_over.append(obs)
+            if self.flight_altitude < obs.min_height:
+                # 飞行高度低于障碍物，需要绕行
+                need_bypass.append(obs)
+            elif self.flight_altitude > obs.max_height:
+                # 飞行高度高于障碍物，可以飞越
+                can_fly_over.append(obs)
             else:
-                # 高度不冲突，但需要绕行2D投影
-                bypass_point = self.find_bypass_points(start, end, obs)
-                if bypass_point:
-                    bypass_needed.append(obs)
+                # 飞行高度与障碍物重叠，需要绕行或提示升高
+                need_bypass.append(obs)
         
-        # 构建绕行路径
-        if bypass_needed:
-            # 使用第一个障碍物的绕行点
-            bypass_point = self.find_bypass_points(start, end, bypass_needed[0])
-            if bypass_point:
-                # 验证绕行路径是否安全
-                waypoints = [start, bypass_point, end]
-                total_distance = (self.calculate_distance(start, bypass_point) +
-                                self.calculate_distance(bypass_point, end))
+        # 如果有需要绕行的障碍物
+        if need_bypass:
+            # 构建绕行路径
+            waypoints = [start]
+            current = start
+            
+            # 按距离排序障碍物
+            for obs in need_bypass:
+                bypass_points = obs.get_bypass_points(current, end)
+                best_point = None
+                best_distance = float('inf')
                 
-                return {
-                    'waypoints': waypoints,
-                    'total_distance': total_distance,
-                    'estimated_time': total_distance / 15,
-                    'is_safe': True,
-                    'path_type': '🔄 绕行路径（避开障碍物）',
-                    'num_waypoints': 3,
-                    'flight_altitude': self.flight_altitude,
-                    'warnings': [f'已绕开 {len(bypass_needed)} 个障碍物']
-                }
+                for bp in bypass_points:
+                    # 检查绕行点是否安全
+                    is_safe = True
+                    for other_obs in self.obstacles:
+                        if other_obs.contains_point_2d(bp):
+                            is_safe = False
+                            break
+                    
+                    if is_safe:
+                        d = self.calculate_distance(current, bp)
+                        if d < best_distance:
+                            best_distance = d
+                            best_point = bp
+                
+                if best_point:
+                    waypoints.append(best_point)
+                    current = best_point
+            
+            waypoints.append(end)
+            
+            # 计算总距离
+            total_distance = 0
+            for i in range(len(waypoints) - 1):
+                total_distance += self.calculate_distance(waypoints[i], waypoints[i+1])
+            
+            # 去重
+            unique_waypoints = []
+            for wp in waypoints:
+                if not unique_waypoints or (wp[0] != unique_waypoints[-1][0] or wp[1] != unique_waypoints[-1][1]):
+                    unique_waypoints.append(wp)
+            
+            return {
+                'waypoints': unique_waypoints,
+                'total_distance': total_distance,
+                'estimated_time': total_distance / 15,
+                'is_safe': True,
+                'is_bypass': True,
+                'path_type': '🔄 绕行路径',
+                'num_waypoints': len(unique_waypoints),
+                'flight_altitude': self.flight_altitude,
+                'message': f'已绕开 {len(need_bypass)} 个障碍物',
+                'bypassed_obstacles': [obs.name for obs in need_bypass]
+            }
         
-        # 如果需要飞越
+        # 如果有可以飞越的障碍物
         if can_fly_over:
-            suggested_altitude = max([obs.max_height + 10 for obs in can_fly_over])
+            total_distance = self.calculate_distance(start, end)
             return {
                 'waypoints': [start, end],
-                'total_distance': self.calculate_distance(start, end),
-                'estimated_time': self.calculate_distance(start, end) / 15,
-                'is_safe': False,
-                'path_type': '⚠️ 需要飞越障碍物',
+                'total_distance': total_distance,
+                'estimated_time': total_distance / 15,
+                'is_safe': True,
+                'is_bypass': False,
+                'path_type': '⬆️ 飞越路径',
                 'num_waypoints': 2,
                 'flight_altitude': self.flight_altitude,
-                'suggested_altitude': suggested_altitude,
-                'warnings': [f'障碍物高度 {obs.min_height}-{obs.max_height}m' for obs in can_fly_over]
+                'message': f'当前高度{self.flight_altitude}m可飞越 {len(can_fly_over)} 个障碍物',
+                'flown_over_obstacles': [obs.name for obs in can_fly_over]
             }
         
         # 默认返回直线
@@ -385,11 +408,16 @@ class FlightPlanner:
             'waypoints': [start, end],
             'total_distance': total_distance,
             'estimated_time': total_distance / 15,
-            'is_safe': True,
-            'path_type': '📏 直线路径',
+            'is_safe': False,
+            'is_bypass': False,
+            'path_type': '⚠️ 需要调整高度',
             'num_waypoints': 2,
             'flight_altitude': self.flight_altitude,
-            'warnings': []
+            'message': '当前高度与障碍物冲突，请降低高度绕行或升高飞越',
+            'suggested_altitudes': {
+                'fly_over': max([obs.max_height + 10 for obs in intersecting]) if intersecting else None,
+                'fly_under': min([obs.min_height - 10 for obs in intersecting if obs.min_height > 10]) if intersecting else None
+            }
         }
 
 
@@ -537,9 +565,9 @@ if 'obstacles' not in st.session_state:
 if 'temp_obstacle' not in st.session_state:
     st.session_state.temp_obstacle = None
 if 'temp_obstacle_height' not in st.session_state:
-    st.session_state.temp_obstacle_height = [0, 100]
+    st.session_state.temp_obstacle_height = [0, 30]
 if 'temp_obstacle_name' not in st.session_state:
-    st.session_state.temp_obstacle_name = "障碍物"
+    st.session_state.temp_obstacle_name = "建筑物"
 if 'flight_plan' not in st.session_state:
     st.session_state.flight_plan = None
 if 'coord_type' not in st.session_state:
@@ -559,7 +587,7 @@ if 'start_time' not in st.session_state:
 if 'altitude_data' not in st.session_state:
     st.session_state.altitude_data = []
 if 'flight_altitude' not in st.session_state:
-    st.session_state.flight_altitude = 50
+    st.session_state.flight_altitude = 20
 
 
 # ==================== 侧边栏 ====================
@@ -596,7 +624,7 @@ with st.sidebar:
 # ==================== 页面1: 航线规划 ====================
 if st.session_state.page == "🗺️ 航线规划":
     st.title("🛰️ 航线规划")
-    st.markdown("设置起降点、3D障碍区，智能绕行或飞越 — **南京科技职业学院**")
+    st.markdown("设置起降点、3D障碍区，**低空绕行 / 高空飞越** — **南京科技职业学院**")
     st.markdown("---")
     
     col_left, col_right = st.columns([1.5, 1])
@@ -607,6 +635,7 @@ if st.session_state.page == "🗺️ 航线规划":
         
         m = folium.Map(location=CAMPUS_CENTER, zoom_start=18, control_scale=True)
         
+        # 高德卫星图
         folium.TileLayer(
             tiles='https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
             attr='高德卫星地图',
@@ -614,12 +643,14 @@ if st.session_state.page == "🗺️ 航线规划":
             name='卫星地图'
         ).add_to(m)
         
+        # OpenStreetMap
         folium.TileLayer(
             tiles='https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
             attr='OpenStreetMap',
             name='街道地图'
         ).add_to(m)
         
+        # 学院标注
         folium.Marker(
             CAMPUS_CENTER,
             popup=folium.Popup('<b>🏫 南京科技职业学院</b><br>南京市江北新区欣乐路188号', max_width=250),
@@ -636,17 +667,20 @@ if st.session_state.page == "🗺️ 航线规划":
                         wgs_lat, wgs_lon = CoordConverter.gcj02_to_wgs84(p[0], p[1])
                         display_obs.append([wgs_lat, wgs_lon])
                 
-                avg_height = (obstacle.min_height + obstacle.max_height) / 2
-                if avg_height > 80:
-                    color = 'darkred'
-                elif avg_height > 40:
-                    color = 'red'
-                else:
+                # 根据高度选择颜色
+                if st.session_state.flight_altitude < obstacle.min_height:
                     color = 'orange'
+                    fill_opacity = 0.3
+                elif st.session_state.flight_altitude > obstacle.max_height:
+                    color = 'green'
+                    fill_opacity = 0.2
+                else:
+                    color = 'red'
+                    fill_opacity = 0.5
                 
                 folium.Polygon(
                     locations=[[p[0], p[1]] for p in display_obs],
-                    color=color, weight=2, fill=True, fill_color=color, fill_opacity=0.35,
+                    color=color, weight=2, fill=True, fill_color=color, fill_opacity=fill_opacity,
                     popup=folium.Popup(obstacle.get_description(), max_width=200)
                 ).add_to(m)
         
@@ -714,33 +748,45 @@ if st.session_state.page == "🗺️ 航线规划":
             st.markdown("### 🆕 新建3D障碍物")
             st.caption(f"已绘制 {len(st.session_state.temp_obstacle)} 个边界点")
             
-            obs_name = st.text_input("障碍物名称", value=st.session_state.temp_obstacle_name)
-            st.session_state.temp_obstacle_name = obs_name
+            obs_name = st.text_input("障碍物名称", value=st.session_state.temp_obstacle_name,
+                                      placeholder="例如：教学楼、图书馆")
+            st.session_state.temp_obstacle_name = obs_name if obs_name else "障碍物"
             
             st.markdown("**📏 高度范围设置**")
             col1, col2 = st.columns(2)
             with col1:
                 min_h = st.number_input("最低高度 (m)", value=st.session_state.temp_obstacle_height[0],
-                                        min_value=0, max_value=200, step=5)
+                                        min_value=0, max_value=200, step=5,
+                                        help="障碍物底部离地高度")
             with col2:
                 max_h = st.number_input("最高高度 (m)", value=st.session_state.temp_obstacle_height[1],
-                                        min_value=min_h + 1, max_value=300, step=5)
+                                        min_value=min_h + 1, max_value=300, step=5,
+                                        help="障碍物顶部高度")
             st.session_state.temp_obstacle_height = [min_h, max_h]
             
             st.caption(f"📊 障碍物高度: {min_h}m - {max_h}m")
             progress_value = min(1.0, max(0.0, max_h / 300))
             st.progress(progress_value)
-            st.caption(f"🔼 障碍物顶部: {max_h}m | 🔽 底部: {min_h}m")
+            
+            # 显示绕行/飞越建议
+            current_flight_h = st.session_state.flight_altitude
+            if current_flight_h < min_h:
+                st.success(f"💡 当前飞行高度 {current_flight_h}m < 障碍物底部，将自动绕行")
+            elif current_flight_h > max_h:
+                st.success(f"💡 当前飞行高度 {current_flight_h}m > 障碍物顶部，可直接飞越")
+            else:
+                st.warning(f"⚠️ 当前飞行高度与障碍物冲突，建议调整")
             
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("✅ 保存障碍物", use_container_width=True, type="primary"):
-                    new_obstacle = Obstacle3D(st.session_state.temp_obstacle, min_h, max_h, obs_name)
+                    new_obstacle = Obstacle3D(st.session_state.temp_obstacle, min_h, max_h, 
+                                              st.session_state.temp_obstacle_name)
                     st.session_state.obstacles.append(new_obstacle)
                     st.session_state.temp_obstacle = None
-                    st.session_state.temp_obstacle_height = [0, 100]
-                    st.session_state.temp_obstacle_name = "障碍物"
-                    st.success(f"✅ 已添加3D障碍物「{obs_name}」")
+                    st.session_state.temp_obstacle_height = [0, 30]
+                    st.session_state.temp_obstacle_name = "建筑物"
+                    st.success(f"✅ 已添加3D障碍物")
                     st.rerun()
             with col2:
                 if st.button("🗑️ 取消", use_container_width=True):
@@ -757,6 +803,7 @@ if st.session_state.page == "🗺️ 航线规划":
         
         # A点设置
         st.markdown("### 🚁 起点 A")
+        st.caption(f"输入坐标系: {st.session_state.coord_type}")
         col1, col2 = st.columns(2)
         with col1:
             lat_a = st.number_input("纬度", value=st.session_state.point_a[0], format="%.6f", key="lat_a")
@@ -783,16 +830,16 @@ if st.session_state.page == "🗺️ 航线规划":
         
         # 飞行参数
         st.markdown("### ⚙️ 飞行参数")
-        flight_altitude = st.slider("设定飞行高度 (m)", 10, 200, st.session_state.flight_altitude,
-                                     help="无人机飞行高度，低于障碍物时会自动绕行")
+        flight_altitude = st.slider("设定飞行高度 (m)", 10, 150, st.session_state.flight_altitude,
+                                     help="低于障碍物时自动绕行，高于障碍物时直接飞越")
         st.session_state.flight_altitude = flight_altitude
         safe_radius = st.slider("安全半径 (m)", 10, 100, 30)
         
         # 智能避障说明
         st.info("💡 **智能避障策略**\n\n"
-                "• 飞行高度低于障碍物 → 自动绕行\n"
-                "• 飞行高度高于障碍物 → 直接飞越\n"
-                "• 无法绕行 → 提示升高高度")
+                "• 高度 < 障碍物底部 → 🔄 自动绕行\n"
+                "• 高度 > 障碍物顶部 → ⬆️ 直接飞越\n"
+                "• 高度与障碍物重叠 → ⚠️ 需调整")
         
         st.markdown("---")
         
@@ -803,24 +850,27 @@ if st.session_state.page == "🗺️ 航线规划":
         if st.session_state.obstacles:
             for i, obs in enumerate(st.session_state.obstacles):
                 # 判断当前高度与障碍物的关系
-                if obs.min_height <= flight_altitude <= obs.max_height:
-                    status_icon = "⚠️"
-                    status_text = "冲突"
-                elif flight_altitude < obs.min_height:
+                if flight_altitude < obs.min_height:
                     status_icon = "🔄"
                     status_text = "可绕行"
-                else:
-                    status_icon = "✅"
+                    status_color = "orange"
+                elif flight_altitude > obs.max_height:
+                    status_icon = "⬆️"
                     status_text = "可飞越"
+                    status_color = "green"
+                else:
+                    status_icon = "⚠️"
+                    status_text = "冲突"
+                    status_color = "red"
                     
-                with st.expander(f"{status_icon} {obs.name} ({len(obs.points)}个点) - {status_text}"):
+                with st.expander(f"{status_icon} {obs.name} ({len(obs.points)}点) - {status_text}"):
                     st.caption(f"📏 高度范围: {obs.min_height}m - {obs.max_height}m")
                     if flight_altitude < obs.min_height:
-                        st.success(f"飞行高度 {flight_altitude}m < 障碍物底部 {obs.min_height}m，将自动绕行")
+                        st.success(f"✅ 飞行高度 {flight_altitude}m < 障碍物底部，将自动绕行")
                     elif flight_altitude > obs.max_height:
-                        st.success(f"飞行高度 {flight_altitude}m > 障碍物顶部 {obs.max_height}m，可直接飞越")
+                        st.success(f"✅ 飞行高度 {flight_altitude}m > 障碍物顶部，可直接飞越")
                     else:
-                        st.warning(f"飞行高度 {flight_altitude}m 与障碍物高度范围冲突！")
+                        st.warning(f"⚠️ 飞行高度 {flight_altitude}m 与障碍物高度范围冲突！")
                     if st.button(f"🗑️ 删除", key=f"del_{i}"):
                         st.session_state.obstacles.pop(i)
                         st.rerun()
@@ -876,10 +926,16 @@ if st.session_state.page == "🗺️ 航线规划":
                         st.session_state.flight_plan = flight_plan
                         if flight_plan['is_safe']:
                             st.success(f"✅ {flight_plan['path_type']}")
+                            if flight_plan.get('message'):
+                                st.info(f"💡 {flight_plan['message']}")
                         else:
                             st.warning(f"⚠️ {flight_plan['path_type']}")
-                            if 'suggested_altitude' in flight_plan:
-                                st.info(f"💡 建议升高至 {flight_plan['suggested_altitude']:.0f}m 以飞越障碍物")
+                            if 'suggested_altitudes' in flight_plan:
+                                sug = flight_plan['suggested_altitudes']
+                                if sug.get('fly_over'):
+                                    st.info(f"💡 建议升高至 {sug['fly_over']:.0f}m 飞越")
+                                if sug.get('fly_under'):
+                                    st.info(f"💡 建议降低至 {sug['fly_under']:.0f}m 绕行")
                         st.rerun()
                     else:
                         st.error("❌ 无法规划安全航线")
@@ -897,9 +953,8 @@ if st.session_state.page == "🗺️ 航线规划":
                     📍 航点数量: {info['num_waypoints']}
                     🛩️ 飞行高度: {info['flight_altitude']} m
                     """)
-                    if info.get('warnings'):
-                        for w in info['warnings']:
-                            st.warning(w)
+                    if info.get('message'):
+                        st.success(f"💡 {info['message']}")
                 else:
                     st.warning("请先规划航线")
 
